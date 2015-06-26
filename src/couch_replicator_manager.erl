@@ -23,6 +23,7 @@
 -export([code_change/3, terminate/2]).
 
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch_changes/include/couch_changes.hrl").
 -include("couch_replicator.hrl").
 -include("couch_replicator_js_functions.hrl").
 
@@ -118,10 +119,12 @@ init(_) ->
         end
     ),
     {Loop, RepDbName} = changes_feed_loop(),
+    _ = couch_event:subscribe_cond(db_updated, [{{'_', '$1'},
+                                                 [{'==', '$1', created}],
+                                                 [true]}]),
     {ok, #state{
         changes_feed_loop = Loop,
         rep_db_name = RepDbName,
-        db_notifier = db_update_notifier(),
         max_retries = retries_value(
             couch_config:get("replicator", "max_replication_retry_count", "10"))
     }}.
@@ -188,13 +191,16 @@ handle_cast(Msg, State) ->
     {stop, {error, {unexpected_cast, Msg}}, State}.
 
 
+handle_info({couch_event, db_updates, {DbName, created}}, State) ->
+    case ?l2b(couch_config:get("replicator", "db", "_replicator")) of
+        DbName ->
+            {noreply, restart(State)};
+        _ ->
+            {noreply, State}
+    end;
 handle_info({'EXIT', From, normal}, #state{changes_feed_loop = From} = State) ->
     % replicator DB deleted
     {noreply, State#state{changes_feed_loop = nil, rep_db_name = nil}};
-
-handle_info({'EXIT', From, Reason}, #state{db_notifier = From} = State) ->
-    ?LOG_ERROR("Database update notifier died. Reason: ~p", [Reason]),
-    {stop, {db_update_notifier_died, Reason}, State};
 
 handle_info({'EXIT', From, normal}, #state{rep_start_pids = Pids} = State) ->
     % one of the replication start processes terminated successfully
@@ -212,9 +218,10 @@ handle_info(Msg, State) ->
 terminate(_Reason, State) ->
     #state{
         rep_start_pids = StartPids,
-        changes_feed_loop = Loop,
-        db_notifier = DbNotifier
+        changes_feed_loop = Loop
     } = State,
+    couch_event:unsubscribe(db_updates),
+
     stop_all_replications(),
     lists:foreach(
         fun(Pid) ->
@@ -224,7 +231,7 @@ terminate(_Reason, State) ->
         [Loop | StartPids]),
     true = ets:delete(?REP_TO_STATE),
     true = ets:delete(?DOC_TO_REP),
-    couch_db_update_notifier:stop(DbNotifier).
+    ok.
 
 
 code_change(_OldVsn, State, _Extra) ->
@@ -273,26 +280,6 @@ has_valid_rep_id(<<?DESIGN_DOC_PREFIX, _Rest/binary>>) ->
     false;
 has_valid_rep_id(_Else) ->
     true.
-
-
-db_update_notifier() ->
-    Server = self(),
-    {ok, Notifier} = couch_db_update_notifier:start_link(
-        fun({created, DbName}) ->
-            case ?l2b(couch_config:get("replicator", "db", "_replicator")) of
-            DbName ->
-                ok = gen_server:cast(Server, {rep_db_created, DbName});
-            _ ->
-                ok
-            end;
-        (_) ->
-            % no need to handle the 'deleted' event - the changes feed loop
-            % dies when the database is deleted
-            ok
-        end
-    ),
-    Notifier.
-
 
 restart(#state{changes_feed_loop = Loop, rep_start_pids = StartPids} = State) ->
     stop_all_replications(),
