@@ -191,7 +191,7 @@ handle_cast(Msg, State) ->
     {stop, {error, {unexpected_cast, Msg}}, State}.
 
 
-handle_info({couch_event, db_updates, {DbName, created}}, State) ->
+handle_info({couch_event, db_updated, {DbName, created}}, State) ->
     case ?l2b(couch_config:get("replicator", "db", "_replicator")) of
         DbName ->
             {noreply, restart(State)};
@@ -220,7 +220,7 @@ terminate(_Reason, State) ->
         rep_start_pids = StartPids,
         changes_feed_loop = Loop
     } = State,
-    couch_event:unsubscribe(db_updates),
+    catch couch_event:unsubscribe(db_updates),
 
     stop_all_replications(),
     lists:foreach(
