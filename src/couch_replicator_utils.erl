@@ -389,23 +389,32 @@ close_db(_HttpDb) ->
     ok.
 
 
-start_db_compaction_notifier(#db{name = DbName}, Server) ->
-    {ok, Notifier} = couch_db_update_notifier:start_link(
-        fun({compacted, DbName1}) when DbName1 =:= DbName ->
-                ok = gen_server:cast(Server, {db_compacted, DbName});
-            (_) ->
-                ok
-        end),
-    Notifier;
+start_db_compaction_notifier(#db{name = Db1}, #db{name=Db2}) ->
+    _ = couch_event:subscribe_cond(db_updated, [{{'$1', '$2'},
+                                                 [{'==', '$2', created},
+                                                  {'orelse',
+                                                   {'==', '$1', Db1},
+                                                   {'==', '$1', Db2}}],
+                                                 [true]}]),
+    true;
+start_db_compaction_notifier(#db{name=DbName}, _) ->
+    _ = couch_event:subscribe_cond(db_updated, [{{DbName, '$1'},
+                                                 [{'==', '$1', compacted}],
+                                                 [true]}]),
+    true;
+start_db_compaction_notifier(_, #db{name=DbName}) ->
+    _ = couch_event:subscribe_cond(db_updated, [{{DbName, '$1'},
+                                                 [{'==', '$1', compacted}],
+                                                 [true]}]),
+    true;
 start_db_compaction_notifier(_, _) ->
-    nil.
+    false.
 
-
-stop_db_compaction_notifier(nil) ->
+stop_db_compaction_notifier(false) ->
     ok;
-stop_db_compaction_notifier(Notifier) ->
-    couch_db_update_notifier:stop(Notifier).
-
+stop_db_compaction_notifier(_) ->
+    catch couch_event:unsubscribe(db_updates),
+    ok.
 
 sum_stats(#rep_stats{} = S1, #rep_stats{} = S2) ->
     #rep_stats{

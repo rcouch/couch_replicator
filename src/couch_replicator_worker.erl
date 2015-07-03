@@ -63,8 +63,7 @@
     pending_fetch = nil,
     flush_waiter = nil,
     stats = #rep_stats{},
-    source_db_compaction_notifier = nil,
-    target_db_compaction_notifier = nil,
+    db_compaction_notifier = false,
     batch = #batch{}
 }).
 
@@ -95,10 +94,7 @@ init({Cp, Source, Target, ChangesManager, MaxConns}) ->
         loop = LoopPid,
         source = open_db(Source),
         target = open_db(Target),
-        source_db_compaction_notifier =
-            start_db_compaction_notifier(Source, self()),
-        target_db_compaction_notifier =
-            start_db_compaction_notifier(Target, self())
+        db_compaction_notifier = start_db_compaction_notifier(Source, Target)
     },
     {ok, State}.
 
@@ -156,6 +152,16 @@ handle_cast(Msg, State) ->
     {stop, {unexpected_async_call, Msg}, State}.
 
 
+handle_info({couch_event, db_updated, {DbName, compacted}},
+            #state{source = #db{name = DbName} = Source} = State) ->
+    {ok, NewSource} = couch_db:reopen(Source),
+    {noreply, State#state{source = NewSource}};
+
+handle_info({couch_event, db_updated, {DbName, compacted}},
+            #state{target = #db{name = DbName} = Target} = State) ->
+    {ok, NewTarget} = couch_db:reopen(Target),
+    {noreply, State#state{target = NewTarget}};
+
 handle_info({'EXIT', Pid, normal}, #state{loop = Pid} = State) ->
     #state{
         batch = #batch{docs = []}, readers = [], writer = nil,
@@ -206,8 +212,7 @@ handle_info({'EXIT', Pid, Reason}, State) ->
 terminate(_Reason, State) ->
     close_db(State#state.source),
     close_db(State#state.target),
-    stop_db_compaction_notifier(State#state.source_db_compaction_notifier),
-    stop_db_compaction_notifier(State#state.target_db_compaction_notifier).
+    stop_db_compaction_notifier(State#state.db_compaction_notifier).
 
 
 code_change(_OldVsn, State, _Extra) ->

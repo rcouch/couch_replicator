@@ -64,8 +64,7 @@
     workers,
     stats = #rep_stats{},
     session_id,
-    source_db_compaction_notifier = nil,
-    target_db_compaction_notifier = nil,
+    db_compaction_notifier = false,
     source_monitor = nil,
     target_monitor = nil,
     source_seq = nil,
@@ -342,6 +341,16 @@ do_init(#rep{options = Options, id = {BaseId, Ext}} = Rep) ->
 handle_info(shutdown, St) ->
     {stop, shutdown, St};
 
+handle_info({couch_event, db_updated, {DbName, compacted}},
+            #rep_state{source = #db{name = DbName} = Source} = State) ->
+    {ok, NewSource} = couch_db:reopen(Source),
+    {noreply, State#rep_state{source = NewSource}};
+
+handle_info({couch_event, db_updated, {DbName, compacted}},
+            #rep_state{target = #db{name = DbName} = Target} = State) ->
+    {ok, NewTarget} = couch_db:reopen(Target),
+    {noreply, State#rep_state{target = NewTarget}};
+
 handle_info({'DOWN', Ref, _, _, Why}, #rep_state{source_monitor = Ref} = St) ->
     ?LOG_ERROR("Source database is down. Reason: ~p", [Why]),
     {stop, source_db_down, St};
@@ -513,10 +522,10 @@ terminate(Reason, State) ->
 
 terminate_cleanup(State) ->
     update_task(State),
-    stop_db_compaction_notifier(State#rep_state.source_db_compaction_notifier),
-    stop_db_compaction_notifier(State#rep_state.target_db_compaction_notifier),
+    stop_db_compaction_notifier(State#rep_state.db_compaction_notifier),
     couch_replicator_api_wrap:db_close(State#rep_state.source),
-    couch_replicator_api_wrap:db_close(State#rep_state.target).
+    couch_replicator_api_wrap:db_close(State#rep_state.target),
+    ok.
 
 
 do_last_checkpoint(#rep_state{seqs_in_progress = [],
@@ -597,10 +606,7 @@ init_state(Rep) ->
         src_starttime = get_value(<<"instance_start_time">>, SourceInfo),
         tgt_starttime = get_value(<<"instance_start_time">>, TargetInfo),
         session_id = couch_uuids:random(),
-        source_db_compaction_notifier =
-            start_db_compaction_notifier(Source, self()),
-        target_db_compaction_notifier =
-            start_db_compaction_notifier(Target, self()),
+        db_compaction_notifier = start_db_compaction_notifier(Source, Target),
         source_monitor = db_monitor(Source),
         target_monitor = db_monitor(Target),
         source_seq = SourceSeq,
